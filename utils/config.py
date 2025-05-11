@@ -110,7 +110,7 @@ def GetConfig(args):
         'enc_dim': 784,
 
 
-        "wandb_entity": "dortsur",
+        "wandb_entity": <WANDB_IDNETITY>,
 
         "schedule": 1,
         "schedule_step": 5,
