@@ -103,7 +103,7 @@ def GetConfig(args):
         'hidden_dim': 32,
         'mod': 'mot',  # options - mot, mgw
         'seed': 1,
-        'data_dist': 'gmm',   # options - uniform, gauss, gmm
+        'data_dist': 'uniform',   # options - uniform, gauss, gmm
         'dataset': 'synthetic',  #options - mnist, synthetic
         'gauss_std': 1,
         # 'dims': [1,1,1,1,1,1,1,1],

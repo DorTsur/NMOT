@@ -657,7 +657,7 @@ def ssim_matrix(x: torch.Tensor, window_size: int = 11) -> torch.Tensor:
     return S
 
 # single shared instance on the proper device
-_encoder = _FrozenResNet18().to("cuda" if torch.cuda.is_available() else "cpu").eval()
+
 
 # ------------------------------------------------------------------
 # 2)  Pair-wise cost builder
@@ -678,6 +678,7 @@ def calc_deep_feature_cost(batch: torch.Tensor) -> torch.Tensor:
         cost[b, i, j] is small when images `i` and `j` in the
         same sample `b` look similar; zero on the diagonal.
     """
+    _encoder = _FrozenResNet18().to("cuda" if torch.cuda.is_available() else "cpu").eval()
     device = next(_encoder.parameters()).device
     B, C, H, W, k = batch.shape
     assert C == 3 and H == 32 and W == 32, "Expect CIFAR sized tensors"
