@@ -91,6 +91,7 @@ wandb/
 figures/
 results/
 checkpoints/
+data/
 *.pkl
 *.pt
 *.pth
