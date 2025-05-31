@@ -13,6 +13,7 @@ class MOT_Sinkhorn():
     def __init__(self, params, X, MU):
         self.eps = params.eps
         self.eta = 1/self.eps
+        self.params = params
         self.k = params.k
         self.mus = MU
         self.n = MU[0].shape[0]
@@ -47,6 +48,8 @@ class MOT_Sinkhorn():
 
             elif cost_graph == 'full':
                 C = QuadCost(data=X, mod='full')
+                if self.params.norm_by_k:
+                    C = C / self.k
                 self.cost = C
                 K = np.exp(-C/self.eps)
 
@@ -91,7 +94,7 @@ class MOT_Sinkhorn():
         assert(method in ['greedy','random','cyclic'])
         t00 = timer()
         curriter = -1
-        while True:
+        while curriter < 250:
             t0 = timer()
             curriter += 1
             if curriter % self.k == 0:
@@ -463,7 +466,10 @@ class MOT_Sinkhorn():
                        'ot_cost': ot_cost
                        })
 
-
+        txt_path = os.path.join(self.params.figDir, 'results_summary.txt')
+        with open(txt_path, 'w') as txt_file:
+            txt_file.write(f"Total Loss: {tot_loss}\n")
+            txt_file.write(f"Average Time: {avg_time}\n")
         print(f'Finished run, loss is {tot_loss:.5f}, average epoch time is {avg_time:.3f} seconds, OT cost is {ot_cost:.5f}')
 
 

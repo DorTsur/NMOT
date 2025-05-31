@@ -19,31 +19,60 @@ from jax.tree_util import tree_map
 import pickle
 import os
 from timeit import default_timer as timer
-from jax import random
+import random
 from jax.nn import relu
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
+import kornia
+import pdb
+from torchvision import models
+from tqdm import tqdm
+
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
+# Neural Estimation models
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
 
 
 class MOT_NE_alg():
+    """
+    Multi-Marginal Optimal Transport Neural Estimation Algorithm.
+    
+    This class implements a neural estimation approach for solving multi-marginal optimal transport problems.
+    It uses a collection of neural networks to estimate the optimal transport plan between multiple distributions.
+    
+    Attributes:
+        models (list): Collection of neural networks, one for each marginal
+        k (int): Number of marginals
+        num_epochs (int): Number of training epochs
+        batch_size (int): Size of training batches
+        eps (float): Regularization parameter for the transport problem
+        cost_graph (str): Structure of cost connections ('full', 'circle', 'tree')
+        device (torch.device): Device to run computations on
+        using_wandb (bool): Whether to use Weights & Biases for logging
+    """
     def __init__(self, params, device, d):
         self.models = []
         self.params = params
         if params.dataset == 'mnist':
             self.k = min(10,params.k)
+            d = 784
         else:
             self.k = params['k']
         self.num_epochs = params['epochs']
         self.batch_size = params['batch_size']
         self.eps = params['eps']
+        
         for i in range(self.k):
-            # model = NE_mot_model(dim=params['dims'][i], hidden_dim=params['hidden_dim'])
-            # model.to(device)
-            ### Tao's
-            # d = params['dims'][i]
-            model = Net_EOT(dim=d, K=min(6*d,80), deeper=True).to(device)
-            ###
+            model = Net_EOT(dim=d, K=min(6*d,80), deeper=True, data=self.params.dataset).to(device)
             self.models.append(model)
+            
         self.cost = params['cost']
         self.opt = [torch.optim.Adam(list(self.models[i].parameters()), lr=params['lr']) for i in range(self.k)]
 
@@ -58,22 +87,44 @@ class MOT_NE_alg():
         self.device = device
         self.cost_graph = params['cost_graph']
         self.using_wandb = params['using_wandb']
-        self.params = params
 
 
     def train_mot(self, X):
-        x_b = DataLoader(X, batch_size=self.batch_size, shuffle=True)
+        """
+        Train the neural networks to estimate the optimal transport plan.
+        
+        Args:
+            X: Input data tensor of shape (batch_size, feature_dim, k) where k is the number of marginals
+            
+        The training process:
+        1. For each epoch:
+            - Process data in batches
+            - For each marginal:
+                - Calculate potentials (phi) using the neural networks
+                - Compute exponential term based on cost structure
+                - Update network parameters using gradient descent
+        2. Track loss and timing metrics
+        """
+        if self.params.efficient_dataset:
+            num_batches = self.params.n//self.params.batch_size
+            x_b = random.sample(range(1, num_batches+1), num_batches)
+        else:
+            x_b = DataLoader(X, batch_size=self.batch_size, shuffle=True)
         self.tot_loss = []
         self.times = []
         for epoch in range(self.num_epochs):
             l = []
             t0 = timer()
-            for i, data in enumerate(x_b):
+            # for _, data in enumerate(x_b):
+            for data in tqdm(x_b):
                 self.zero_grad_models()
                 # data.to(self.device)
+                # print(f'data shape {data.shape}')
                 for k_ind in range(self.k):
                     # k-margin loss
-                    phi = [self.models[i](data[:,:,i]) for i in range(self.k)]  # each phi[i] should have shape (b,1)
+                    # phi = [self.models[i](data[:,:,i]) for i in range(self.k)]  # each phi[i] should have shape (b,1)
+                    phi = [self.models[i](data[...,i]) for i in range(self.k)]  # each phi[i] should have shape (b,1)
+                    # print(f'phi0 shape {phi[0].shape}')
                     e_term = self.calc_exp_term(phi, data)
                     loss = -(sum(phi).mean() - self.eps*e_term)
                     if self.params.regularize_pariwise_coupling and self.params.cost_graph != 'full':
@@ -124,6 +175,7 @@ class MOT_NE_alg():
     def save_results(self,X=None):
         tot_loss = np.mean(self.tot_loss[-10:])
         avg_time = np.mean(self.times)
+        
         data_to_save = {
             'avg_loss': tot_loss,
             'avg_time': avg_time,
@@ -146,6 +198,12 @@ class MOT_NE_alg():
         # Saving the data using pickle
         with open(path, 'wb') as file:
             pickle.dump(data_to_save, file)
+
+        # Save tot_loss and avg_time to a text file
+        txt_path = os.path.join(self.params.figDir, 'results_summary.txt')
+        with open(txt_path, 'w') as txt_file:
+            txt_file.write(f"Total Loss: {tot_loss}\n")
+            txt_file.write(f"Average Time: {avg_time}\n")
 
         if self.using_wandb:
             wandb.log({'tot_loss': tot_loss,
@@ -174,23 +232,46 @@ class MOT_NE_alg():
         # return ot_cost/normal
 
     def calc_exp_term(self, phi, x):
-        # TD - IMPLEMENT MORE MEMORY EFFICIENT CALCULATION!!! DIVIDE LOSS!!
-
+        """
+        Calculate the exponential term in the dual OT formulation.
+        
+        Args:
+            phi (list): List of potential functions from each neural network
+            x: Input data tensor
+            
+        Returns:
+            float: Mean of the exponential term across the batch
+            
+        The calculation depends on the cost_graph structure:
+        - 'full': Computes all pairwise interactions
+        - 'circle': Only computes interactions between adjacent marginals
+        - 'tree': Follows a tree structure for interactions
+        """
         # calc loss tensor
 
         if self.params.cost_implement == 'simplified':
             reduced_phi = torch.sum(torch.concatenate(phi, axis=1), axis=1)
+            if self.params.dataset == 'cifar':
+                # calc scores pairwise
+                cost = calc_deep_feature_cost(x)
+                cost = cost/cost.max()
+                e_term = torch.exp((reduced_phi - cost.sum(axis=(1,2)))/self.eps)
+                return e_term.mean()
             if self.cost_graph == 'full':
                 # calculate the simplified loss
                 # calc reduced phi term:
 
                 # cal reduced cost term:
+                # print(f'x shape {x.shape}')
                 diffs = x.unsqueeze(-1) - x.unsqueeze(-2)
-                # calc cost. this method counts all cost terms twice, se we divide the cost by 2.
                 cost = 0.5*torch.norm(diffs, dim=1) ** 2
                 if self.params.dataset == 'mnist':
-                    # cost = cost/x.shape[1]
+                    #COSSIM:
+                    cost = (x.unsqueeze(-1) * x.unsqueeze(-2)).sum(dim=1)
                     cost = cost/cost.max()
+                    # cost = ssim_matrix(x)
+                if self.params.norm_by_k:
+                    cost = cost / self.k
                 e_term = torch.exp((reduced_phi - cost.sum(axis=(1,2)))/self.eps)
             elif self.cost_graph == 'circle':
                 shifted_x = torch.roll(x, shifts=1, dims=-1)
@@ -235,6 +316,9 @@ class MOT_NE_alg():
             e_term = self.calc_exp_term_tree(n,phi,c)
             return e_term
 
+    def zero_grad_models(self):
+        for opt in self.opt:
+            opt.zero_grad()
 
 
     def calc_exp_term_tree(self, n, phi, c):
@@ -286,15 +370,25 @@ class MOT_NE_alg():
         # NOW - BROADCAST!!
         return cost
 
-    def zero_grad_models(self):
-        for opt in self.opt:
-            opt.zero_grad()
-
+    
     def models_to_eval(self):
         for model in self.models:
             model.eval()
 
     def calc_plan(self, X):
+        """
+        Calculate the optimal transport plan based on the trained neural networks.
+        
+        Args:
+            X: Input data tensor
+            
+        Returns:
+            tensor: The optimal transport plan
+            
+        The plan calculation depends on the cost_graph structure:
+        - For 'circle': Computes pairwise plans between adjacent marginals
+        - For other structures: Computes the full plan based on all potentials
+        """
         if self.cost_graph == 'circle':
             phi = [self.models[i](X[:, :, i]) for i in range(self.k)]
             c = self.calc_cost(X)
@@ -323,123 +417,23 @@ class MOT_NE_alg():
             ot_plan = torch.exp((reshaped_term - c) / self.eps)
         return ot_plan
 
-    def calc_pairwise_plan_old(self, L,i,j):
-        '''
-        calculate the pairwise plan from margin i to margin j
-        TD (from pic) - start from (i,i+1) and then (k,1) and then general (i,j)?
-        Pi_{i,j} = \prod_{l=i}^{j-1}L_{l,l+1} \odot (\prod_{l=1}^{i-1}L_{l,l+1}) @ (\prod_{l=j+1}^{k}L_{l,l+1}).T
-        currently implemented for same number of samples.
-        '''
-        k = len(L)
-        n = L[0].shape[0]
-
-        if i == 0:
-            A = torch.eye(L[0].shape[0]).to(self.device)
-            B = torch.eye(L[0].shape[0]).to(self.device)
-
-            for l in range(k):
-                if l<j:
-                    A = A@L[l]
-                else:
-                    B = B@L[l]
-            C = A * B
-            print(f'adjacent with zero, P adds up to {torch.sum(C)}')
-            return C/(n**k)
-        elif j == (i+1)%k:
-            if j == i+1:
-                # two adjacent idx, i !=0, j=i+1
-                A = torch.eye(n).to(self.device)
-                B = torch.eye(n).to(self.device)
-                for l in range(k):
-                    if l <= i:
-                        A = A @ L[l]
-                    else:
-                        B = B @ L[l]
-                C = (A.T * B.T)
-                print(f'adjacent, P adds up to {torch.sum(C)/(n**k)}')
-                return C/(n**k)
-            else:
-                # cycle case or
-                # two adjacent idx, i !=0, j=i+1
-                A = torch.eye(n).to(self.device)
-                B = torch.eye(n).to(self.device)
-                for l in range(k):
-                    if l <= i:
-                        A = A @ L[l]
-                    else:
-                        B = B @ L[l]
-                C = (A * B.T)
-                print(f'adjacent, P adds up to {torch.sum(C) / (L[0].shape[0] ** k)}')
-                return C/(n**k)
-        else:
-            # GENERAL CASE
-            return
-
-    def calc_pairwise_plan_(self, L,i,j,verbose=True):
-        ### NEW IMPLEMENTATION
-        '''
-        calculate the pairwise plan from margin i to margin j
-        TD (from pic) - start from (i,i+1) and then (k,1) and then general (i,j)?
-        Pi_{i,j} = \prod_{l=i}^{j-1}L_{l,l+1} \odot (\prod_{l=1}^{i-1}L_{l,l+1}) @ (\prod_{l=j+1}^{k}L_{l,l+1}).T
-        currently implemented for same number of samples.
-        '''
-        k = len(L)
-        n = L[0].shape[0]
-
-        if i == 0:
-            A = torch.eye(L[0].shape[0]).to(self.device)
-            B = torch.eye(L[0].shape[0]).to(self.device)
-
-            for l in range(k):
-                if l<j:
-                    A = A@L[l]
-                    # A = A@L[l]/n
-                else:
-                    B = B@L[l]
-                    # B = B @ L[l] / n
-            C = A.T*B.T
-            if verbose:
-                print(f'adjacent, P adds up to {torch.sum(C)}')
-            return C
-        elif j == (i+1)%k:
-            if j == i+1:
-                # two adjacent idx, i !=0, j=i+1
-                A = torch.eye(n).to(self.device)
-                B = torch.eye(n).to(self.device)
-                for l in range(k):
-                    if l <= i:
-                        A = A @ L[l]
-                        # A = A @ L[l]/n
-                        # A = A @ L[l]/(n*L[l].sum(0))
-                    else:
-                        B = B @ L[l]
-                        # B = B @ L[l]/n
-                        # B = B @ L[l]/(n*L[l].sum(0))
-                C = (A.T * B.T)
-                if verbose:
-                    print(f'adjacent, P adds up to {torch.sum(C)}')
-                return C
-            else:
-                # cycle case or
-                # two adjacent idx, i !=0, j=i+1
-                A = torch.eye(n).to(self.device)
-                B = torch.eye(n).to(self.device)
-                for l in range(k):
-                    if l <= i:
-                        A = A @ L[l]
-                        # A = A @ L[l]/n
-                    else:
-                        B = B @ L[l]
-                        # B = B @ L[l] / n
-                C = (A.T * B.T)
-                if verbose:
-                    print(f'adjacent, P adds up to {torch.sum(C)}')
-                return C
-        else:
-            # GENERAL CASE
-            return
-
     def calc_pairwise_plan(self, L, i, verbose=False):
+        """
+        Calculate the pairwise optimal transport plan between marginals.
+        
+        Args:
+            L (list): List of transport matrices
+            i (int): Index of the source marginal
+            verbose (bool): Whether to print debugging information
+            
+        Returns:
+            tensor: The normalized pairwise transport plan
+            
+        Computes the plan by:
+        1. Calculating product of matrices up to index i-1
+        2. Calculating product of matrices after index i
+        3. Computing the final plan through matrix operations
+        """
         # Compute A: Product of matrices up to index i-1
         if i > 0:
             A = L[0]
@@ -479,6 +473,252 @@ class MOT_NE_alg():
             ot_plan = self.calc_pairwise_plan(exp_terms, i, (i + 1) % self.k, verbose=False)
             reg += (torch.sum(ot_plan)-1.0).abs()
         return reg
+
+
+class Net_EOT(nn.Module):
+    """
+    Neural network for Entropy-regularized Optimal Transport estimation.
+    
+    A flexible neural architecture that can handle different input dimensions and data types.
+    Supports both standard feedforward networks and convolutional networks for image data.
+    
+    Args:
+        dim (int): Input dimension
+        K (int): Hidden layer width multiplier
+        deeper (bool): Whether to use a deeper architecture
+        data (str): Type of data ('mnist', 'cifar', None)
+    """
+    def __init__(self, dim, K, deeper=False, data=None):
+        super(Net_EOT, self).__init__()
+        self.deeper = deeper
+        self.data = data
+        
+        if self.data == "cifar":
+            self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+            self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+            self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
+            self.pool = nn.MaxPool2d(2, 2)
+            self.fc_c1 = nn.Linear(128 * 4 * 4, 256)
+            self.fc_c2 = nn.Linear(256, 1)
+        elif data == 'mnist':
+            self.fc1 = nn.Linear(dim, 2 * dim)
+            self.fc2 = nn.Linear(2 * dim, 2 * dim)
+            self.fc3 = nn.Linear(2 * dim, 32)
+            self.fc4 = nn.Linear(32, 1)
+        elif deeper:
+            self.fc1 = nn.Linear(dim, 10 * K)
+            self.fc2 = nn.Linear(10 * K, 10 * K)
+            self.fc3 = nn.Linear(10 * K, K)
+            self.fc4 = nn.Linear(K, 1)
+        else:
+            self.fc1 = nn.Linear(dim, K)
+            self.fc2 = nn.Linear(K, 1)
+
+    def forward(self, x):
+        """
+        Forward pass of the network.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            tensor: Network output (potential function value)
+            
+        The architecture adapts based on the data type:
+        - For MNIST: Uses a 4-layer MLP with specific dimensions
+        - For CIFAR: Uses a CNN with 3 conv layers followed by FC layers
+        - For other data: Uses either a 2-layer or 4-layer MLP based on 'deeper' flag
+        """
+        if self.data == 'mnist':
+            if x.dim() > 2:
+                x = x.view(x.size(0), -1)
+            x = x / 255.0
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+            x2 = self.fc4(x)
+        elif self.data == "cifar":
+            x = self.pool(F.relu(self.conv1(x)))
+            x = self.pool(F.relu(self.conv2(x)))
+            x = self.pool(F.relu(self.conv3(x)))
+            x = x.view(x.size(0), -1)
+            x = F.relu(self.fc_c1(x))
+            return self.fc_c2(x)
+        elif self.deeper:
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+            x2 = self.fc4(x)
+        else:
+            x1 = F.relu(self.fc1(x))
+            x2 = self.fc2(x1)
+        return x2
+
+
+class _FrozenResNet18(nn.Module):
+    def __init__(self):
+        super().__init__()
+        backbone = models.resnet18(
+            weights=models.ResNet18_Weights.IMAGENET1K_V1
+        )
+        self.features = nn.Sequential(*list(backbone.children())[:-2])  # up to conv5_x
+        self.pool     = nn.AdaptiveAvgPool2d((1, 1))
+
+        for p in self.features.parameters():
+            p.requires_grad = False   # encoder is frozen
+
+    def forward(self, x):             # x : (N, 3, 32, 32)
+        z = self.pool(self.features(x)).flatten(1)   # (N, 512)
+        return z
+
+
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
+# Support functions
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+
+
+class DeepFeatureL2(nn.Module):
+    """
+    Differentiable distance for CIFAR images.
+    • Input : x, y   tensors of shape (B, 3, 32, 32) in [0,1], already mean/std-normalised.
+    • Output: d      tensor (B,) where smaller ⇒ images are more alike.
+    """
+    def __init__(self, device="cpu"):
+        super().__init__()
+
+        # 1) Pre-trained backbone (frozen)
+        backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        self.encoder = nn.Sequential(*list(backbone.children())[:-2])  # keep layers up to conv5_x
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+        self.encoder.to(device).eval()
+
+        # 2) Tiny head that global-avg-pools to a 512-d vector (still differentiable)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+    # ------------------------------------------------------------
+    def forward(self, x, y):
+        # both x and y : (B,3,32,32)   - ensure same device
+        z1 = self.avgpool(self.encoder(x)).flatten(1)      # (B, 512)
+        z2 = self.avgpool(self.encoder(y)).flatten(1)
+
+        # squared L2 in feature space  – size (B,)
+        return (z1 - z2).pow(2).sum(dim=1)
+
+def ssim_matrix(x: torch.Tensor, window_size: int = 11) -> torch.Tensor:
+    """
+    Compute a (K × K) SSIM matrix for each element of a batched tensor of
+    vectorised MNIST images.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Shape (B, 784, K).  Values can be in [0, 1] or [0, 255].
+    window_size : int, optional
+        Size of the Gaussian window used inside SSIM (default 11).
+
+    Returns
+    -------
+    torch.Tensor
+        SSIM matrix of shape (B, K, K), differentiable.
+    """
+    # pdb.set_trace()
+    B, N, K = x.shape
+    assert N == 784, "Second dimension must be 784 (28x28)."
+
+    # Put channel first and reshape: (B, K, 1, 28, 28)
+    imgs = x.permute(0, 2, 1).reshape(B, K, 1, 28, 28)
+
+    # Normalise to [0,1] if needed
+    if imgs.max() > 1:
+        imgs = imgs / 255.0
+
+    # Pre-allocate the similarity tensor
+    S = torch.empty(B, K, K, device=imgs.device, dtype=imgs.dtype)
+
+    # Kornia's ssim_loss expects (N, C, H, W);
+    # we compare every pair (i, j) in a double loop.
+    # K is small (≤10 for MNIST digits), so the loop is negligible.
+    for i in range(K):
+        for j in range(K):
+            dssim = kornia.losses.ssim_loss(
+                imgs[:, i], imgs[:, j], window_size=window_size, reduction='mean'
+            )  # Reduce to a scalar (B,)
+            S[:, i, j] = 1.0 - 2.0 * dssim  # convert DSSIM → SSIM
+
+    return S
+
+# single shared instance on the proper device
+_encoder = _FrozenResNet18().to("cuda" if torch.cuda.is_available() else "cpu").eval()
+
+# ------------------------------------------------------------------
+# 2)  Pair-wise cost builder
+# ------------------------------------------------------------------
+def calc_deep_feature_cost(batch: torch.Tensor) -> torch.Tensor:
+    """
+    Parameters
+    ----------
+    batch : (B, 3, 32, 32, k) tensor
+        A minibatch containing k CIFAR images per "sample".
+        Assumed already in [0,1] and channel-wise normalised
+        (e.g. with CIFAR-10/100 mean & std).
+
+    Returns
+    -------
+    cost : (B, k, k) tensor
+        Squared L2 distances in ResNet-18 feature space.
+        cost[b, i, j] is small when images `i` and `j` in the
+        same sample `b` look similar; zero on the diagonal.
+    """
+    device = next(_encoder.parameters()).device
+    B, C, H, W, k = batch.shape
+    assert C == 3 and H == 32 and W == 32, "Expect CIFAR sized tensors"
+
+    # ——— reshape so we can embed all images in one forward pass ———
+    imgs = batch.permute(0, 4, 1, 2, 3).reshape(B * k, C, H, W).to(device)
+
+    # embeddings: (B*k, 512)
+    feats = _encoder(imgs)                         
+
+    # reshape back → (B, k, 512)
+    feats = feats.view(B, k, -1)
+
+    # ——— pair-wise squared L2 in feature space ———
+    # feats[:, :, None, :] − feats[:, None, :, :] → (B, k, k, 512)
+    d2 = (feats[:, :, None, :] - feats[:, None, :, :]).pow(2).sum(-1)
+
+    return d2      # shape (B, k, k)
+
+
+
+
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
+# Additional code
+############################################################################################################
+############################################################################################################
+############################################################################################################
+############################################################################################################
+
+
+class A_model(nn.Module):
+    def __init__(self, d_in, d_out):
+        super(A_model, self).__init__()
+        self.A = nn.Parameter(torch.full((d_in, d_out), 1e-3))
+
+    def forward(self, x):
+        x1, x2 = x
+        return x1 @ self.A @ x2.T
 
 class MGW_NE_alg(MOT_NE_alg):
     def __init__(self, params, device, X):
@@ -894,57 +1134,6 @@ class MGW_NE_alg(MOT_NE_alg):
         # Stack into a 1D tensor of length k-1
         return torch.cat(results, dim=0)
 
-class Net_EOT(nn.Module):
-    def __init__(self,dim,K,deeper=False):
-        super(Net_EOT, self).__init__()
-        self.deeper=deeper
-        if deeper:
-            self.fc1 = nn.Linear(dim, 10 * K)
-            self.fc2 = nn.Linear(10 * K, 10 * K)
-            self.fc3 = nn.Linear(10 * K, 1)
-        else:
-            self.fc1 = nn.Linear(dim, K)
-            self.fc2 = nn.Linear(K, 1)
-
-    def forward(self, x):
-        if self.deeper:
-            x1 = F.relu(self.fc1(x))
-            x11 = F.relu(self.fc2(x1))
-            x2 = self.fc3(x11)
-            ###
-            # x2 = F.tanh(x2)
-            ###
-        else:
-            x1 = F.relu(self.fc1(x))
-            x2 = self.fc2(x1)
-        return x2
-
-
-class NE_mot_model(nn.Module):
-    def __init__(self, dim, hidden_dim=32):
-        super(NE_mot_model, self).__init__()
-        self.dim = dim
-
-        # Taos's N-GW model
-        self.fc1 = nn.Linear(dim, self.dim)
-        self.fc2 = nn.Linear(self.dim, 1)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-class A_model(nn.Module):
-    def __init__(self, d_in, d_out):
-        super(A_model, self).__init__()
-        self.A = nn.Parameter(torch.full((d_in, d_out), 1e-3))
-
-    def forward(self, x):
-        x1, x2 = x
-        return x1 @ self.A @ x2.T
-
-
-
 
 class MOT_NE_alg_JAX:
     def __init__(self, params, device=None):  # Device is not explicitly used in JAX, it manages devices
@@ -1180,25 +1369,25 @@ class Net_EOT_JAX:  # Consistent with previous code
     def init(self, key):
         # Initialize parameters using Glorot (Xavier) uniform initialization.
         # This is a common and good practice.
-        key1, key2 = random.split(key)
-        fc1_w = random.uniform(key1, (self.dim, self.hidden_dim),
+        key1, key2 = jax.random.split(key)
+        fc1_w = jax.random.uniform(key1, (self.dim, self.hidden_dim),
                                minval=-jnp.sqrt(6/(self.dim+self.hidden_dim)),
                                maxval=jnp.sqrt(6/(self.dim+self.hidden_dim)))  # Glorot/Xavier uniform
-        fc1_b = random.uniform(key1, (self.hidden_dim,),
+        fc1_b = jax.random.uniform(key1, (self.hidden_dim,),
                                minval=-jnp.sqrt(6/(self.dim+self.hidden_dim)),
                                maxval=jnp.sqrt(6/(self.dim+self.hidden_dim)))
 
-        fc2_w = random.uniform(key2, (self.hidden_dim, self.hidden_dim),
+        fc2_w = jax.random.uniform(key2, (self.hidden_dim, self.hidden_dim),
                                minval=-jnp.sqrt(6/(self.hidden_dim+1)),
                                maxval=jnp.sqrt(6/(self.hidden_dim+1)))
-        fc2_b = random.uniform(key2, (self.hidden_dim,),
+        fc2_b = jax.random.uniform(key2, (self.hidden_dim,),
                                minval=-jnp.sqrt(6/(self.hidden_dim+1)),
                                maxval=jnp.sqrt(6/(self.hidden_dim+1)))
 
-        fc3_w = random.uniform(key2, (self.hidden_dim, 1),
+        fc3_w = jax.random.uniform(key2, (self.hidden_dim, 1),
                                minval=-jnp.sqrt(6 / (self.hidden_dim + 1)),
                                maxval=jnp.sqrt(6 / (self.hidden_dim + 1)))
-        fc3_b = random.uniform(key2, (1,),
+        fc3_b = jax.random.uniform(key2, (1,),
                                minval=-jnp.sqrt(6 / (self.hidden_dim + 1)),
                                maxval=jnp.sqrt(6 / (self.hidden_dim + 1)))
 
@@ -1217,11 +1406,6 @@ class Net_EOT_JAX:  # Consistent with previous code
         x = jnp.dot(x, params['fc3']['w']) + params['fc3']['b']
         return x.squeeze(-1)  # Remove the last dimension to match the PyTorch output shape (b,)
 
-
-############################################################################################################
-############################################################################################################
-############################################################################################################
-############################################################################################################
 
 class encoder_model_JAX:
     def __init__(self, k, dataset, out_dim=10):
@@ -1554,3 +1738,7 @@ class contrastiveLearningTrainer:
         accuracy = accuracy_score(np.array(y_test), y_pred)
 
         print(f"Linear classifier accuracy: {accuracy:.4f}")
+
+        
+
+        

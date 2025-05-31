@@ -8,12 +8,21 @@ import jax.random as jr
 from torchvision import datasets, transforms
 from PIL import Image
 import torchvision.transforms.functional as TF
+import math
 
 
 
 def gen_data(params, dataset=None):
     if params.dataset == 'mnist':
         X = gen_mnist_tensor(params)
+        if params['alg'] == 'sinkhorn_mot':
+            n = X.shape[0]
+            MU = [(1 /n) * np.ones(n)]*params['k']
+            return X, MU
+        return X
+    if params.dataset == 'cifar':
+        # X = gen_cifar100_tensor(params)
+        X = gen_cifar10_tensor(params)
         if params['alg'] == 'sinkhorn_mot':
             n = X.shape[0]
             MU = [(1 /n) * np.ones(n)]*params['k']
@@ -43,6 +52,11 @@ def gen_data(params, dataset=None):
                     #                        (params['n'], params['dims'][i])).astype(np.float32)
                 )
 
+        elif params['data_dist'] == 'gmm':
+            X = []
+            for _ in range(params.k):
+                X.append(gen_gmm(params))
+
         if params['alg'] not in ('ne_mgw','ne_mot'):
             X = np.stack(X, axis=-1)
             MU = [(1 / params['n']) * np.ones(params['n'])]*params['k']
@@ -53,6 +67,45 @@ def gen_data(params, dataset=None):
             X = [torch.from_numpy(x) for x in X]
     return X
 
+def gen_gmm(params):
+    """
+    Parameters:
+    d - Ambient dimension.
+    k - Intrinsic dimension (k <= d).
+    n - Number of data points.
+    m -: Number of cluster centers.
+    sigma (float): Standard deviation for the isotropic Gaussian noise.
+
+    """
+    d = params.dim
+    k = d//2
+    n = params.n
+    m = 3
+    sigma = 0.1
+
+
+    Q = np.eye(d, k)  # shape: (d, k)
+
+    # Step 2: Deterministic cluster centers in the intrinsic k-dimensional space.
+    # We'll create a grid in [-1, 1]^k that has at least m points.
+    # Determine how many grid points per axis we need.
+    r = math.ceil(m ** (1 / k))
+    grid_axes = [np.linspace(-1, 1, r) for _ in range(k)]
+    # Create a meshgrid and flatten to get all grid points in R^k.
+    mesh = np.meshgrid(*grid_axes)
+    grid = np.stack([g.flatten() for g in mesh], axis=-1)  # shape: (r**k, k)
+    # Choose the first m points from the grid as the cluster centers.
+    centers_sub = grid[:m]
+
+    # Map the centers to the ambient space R^d.
+    centers = centers_sub @ Q.T  # shape: (m, d)
+    
+    # Step 3 & 4: Sample n data points from the Gaussian mixture model.
+    # For each point, choose a cluster uniformly at random and sample from N(center, sigma^2 * I_d).
+    indices = np.random.choice(m, size=n, replace=True)  # choose a cluster for each data point
+    X = centers[indices] + sigma * np.random.randn(n, d)
+    
+    return X.astype(np.float32)
 
 def QuadCost(data, mod='circle', root=None):
     k = data.shape[-1]
@@ -116,7 +169,7 @@ def QuadCost(data, mod='circle', root=None):
         ###
         if isinstance(data, np.ndarray):
             # CLASSIC ALG
-            differences = np.zeros([n] * k)
+            differences = np.zeros([n] * k,dtype=np.float32)
             for i in range(k):
                 for j in range(i + 1, k):
                     # Extract vectors for variables i and j
@@ -251,7 +304,7 @@ def kronecker_product(vectors):
     return out
 
 def calc_ent(p):
-    return -np.sum(p*np.log(p))
+    return -np.sum(p*np.log(p+1e-10))
 
 
 def EulerSigma(data, case=0):
@@ -310,7 +363,6 @@ def gen_mnist(params):
 
     # Disable SSL verification
     ssl._create_default_https_context = ssl._create_unverified_context
-    
     mnist_train = datasets.MNIST(root=mnist_path, train=False, download=True, transform=transform)
     mnist_loader = DataLoader(mnist_train, batch_size=params['batch_size'], shuffle=True)
     return mnist_loader
@@ -324,7 +376,7 @@ def gen_mnist_tensor(params):
     mnist_path = './data/mnist_data/'
     if not os.path.exists(mnist_path):
         raise RuntimeError(f"MNIST dataset not found at {mnist_path}")
-
+    print(f'loading MNIST')
     # Disable SSL verification
     ssl._create_default_https_context = ssl._create_unverified_context
     
@@ -345,7 +397,10 @@ def gen_mnist_tensor(params):
 
     mnist_tensor = torch.stack(balanced_data, dim=-1)
 
-    mnist_tensor = mnist_tensor[:,:,:params.k]
+    if params.mnist_marginals != [] and len(params.mnist_marginals) == params.k:
+        mnist_tensor = mnist_tensor[:,:,params.mnist_marginals]
+    else:
+        mnist_tensor = mnist_tensor[:,:,:params.k]
 
     return mnist_tensor
 
@@ -432,3 +487,96 @@ def perspective_warp(img,
         Warped image.
     """
     return TF.perspective(img, startpoints, endpoints)
+
+
+
+def gen_cifar100_tensor(params):
+    """
+    Returns a tensor of shape (n, 3072, params.k) where
+      - n  = min #images available per class   (500 for CIFAR-100)
+      - 3072 = 32x32x3 flattened pixels
+      - params.k ≤ 100 is the number of classes you keep
+    The routine mirrors gen_mnist_tensor: it balances the classes,
+    stacks them along a new last dimension, and truncates to k classes.
+    """
+    CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
+    CIFAR100_STD  = (0.2675, 0.2565, 0.2761)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
+        # Map each image back to [0,1] exactly like the MNIST helper
+        transforms.Lambda(lambda x: (x - x.min()) / (x.max() - x.min()))
+    ])
+
+    cifar_path = "./data/cifar_data/"
+    ssl._create_default_https_context = ssl._create_unverified_context  # disable SSL-verify
+    cifar_train = datasets.CIFAR100(root=cifar_path,
+                                    train=True,
+                                    download=True,
+                                    transform=transform)
+
+    # ----- flatten raw uint8 images exactly like the MNIST helper -----
+    # cifar_train.data: (50_000, 32, 32, 3) uint8
+    data   = torch.tensor(cifar_train.data).float()             # → float32 [0–255]
+    data   = data.permute(0, 3, 1, 2).reshape(-1, 32*32*3)      # (N, 3072)
+    labels = torch.tensor(cifar_train.targets)                  # (N,)
+
+    class_data = {i: [] for i in range(100)}
+    for img, lbl in zip(data, labels):
+        class_data[int(lbl)].append(img)
+
+    # stack into balanced tensors
+    n = min(len(v) for v in class_data.values())                # ⇒ 500
+    balanced = [torch.stack(class_data[i][:n], dim=0)
+                for i in range(100)]
+
+    cifar_tensor = torch.stack(balanced, dim=-1)                # (n, 3072, 100)
+    cifar_tensor = cifar_tensor[:, :, :params.k]                # keep first k classes
+
+    return cifar_tensor
+
+
+
+def gen_cifar10_tensor(params):
+    """
+    Returns a tensor of shape (n, 3072, params.k) where
+      - n  = min #images available per class   (500 for CIFAR-100)
+      - 3072 = 32x32x3 flattened pixels
+      - params.k ≤ 100 is the number of classes you keep
+    The routine mirrors gen_mnist_tensor: it balances the classes,
+    stacks them along a new last dimension, and truncates to k classes.
+    """
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                   (0.2470, 0.2435, 0.2616)),
+        # Map each image back to [0,1] exactly like the MNIST helper
+        transforms.Lambda(lambda x: (x - x.min()) / (x.max() - x.min()))
+    ])
+
+    cifar_path = "./data/cifar_data/"
+    ssl._create_default_https_context = ssl._create_unverified_context  # disable SSL-verify
+    cifar_train = datasets.CIFAR10(root=cifar_path,
+                                    train=True,
+                                    download=True,
+                                    transform=transform)
+
+    imgs   = torch.tensor(cifar_train.data, dtype=torch.float32)      # (N,32,32,3)
+    imgs   = imgs.permute(0, 3, 1, 2) / 255.0                        # → (N,3,32,32) in [0,1]
+    labels = torch.tensor(cifar_train.targets)                       # (N,)
+
+    # collect samples by class
+    class_data = {i: [] for i in range(10)}
+    for img, lbl in zip(imgs, labels):
+        class_data[int(lbl)].append(img)
+
+    # stack into a balanced tensor: (n, 3, 32, 32) for each class
+    n = min(len(v) for v in class_data.values())                     # 500 for CIFAR train split
+    balanced = [torch.stack(class_data[i][:n], dim=0)                # (n,3,32,32)
+                for i in range(10)]
+
+    # final shape  (n, 3, 32, 32, k)   —  last axis indexes the class / marginal
+    cifar_tensor = torch.stack(balanced, dim=-1)                     # stack on new last dim
+    cifar_tensor = cifar_tensor[..., :params.k]                      # keep first k classes
+
+    return cifar_tensor

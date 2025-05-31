@@ -1,0 +1,23 @@
+name: nmot-env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - pip:
+      - torch>=1.7
+      - jax>=0.2.0
+      - jaxlib>=0.1.55
+      - numpy>=1.18
+      - scipy>=1.4
+      - torchvision>=0.8
+      - pillow>=7.0
+      - python-box>=5.0
+      - wandb>=0.10
+      - pulp>=2.0
+      - optax>=0.1.0
+      - scikit-learn>=0.24
+      - kornia>=0.5.0
+      - tqdm>=4.0
+      - anytree>=2.8.0 

@@ -5,14 +5,16 @@ from utils.config import PreprocessMeta
 from sinkhorn.sinkhorn_utils import MOT_Sinkhorn
 from utils.data_fns import gen_data
 import pprint
+import pdb
 
 def main():
     # TD:
+    # pdb.set_trace()
     params = PreprocessMeta()
     # if params.alg in ['ne_mot', 'sinkhorn_mot'] or params.data_dist == 'uniform':
     params.dims = [params.dim]*params.k
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(params['cuda_visible'])
+    # os.environ["CUDA_VISIBLE_DEVICES"] = str(params['cuda_visible'])
     device = torch.device("cuda:0" if (torch.cuda.is_available() and params['device'] == 'gpu') else "cpu")
     print(f"Using {device}")
 
@@ -25,7 +27,16 @@ def main():
     if params.alg == 'sinkhorn_mot' and params.cost_graph == 'full' and params.n >= 750 and params.dataset != 'mnist':
         params.n = 500
         print(f'n is too big for sinkhorn algorithm. Setting n to {params.n}')
+    
+    if params.k > 15:
+        params.efficient_dataset = False
+        X = None
+    else: params.efficient_dataset = False
+
     X = gen_data(params)
+    print(X[0].dtype)
+
+    
 
     if params.alg == 'ne_mot':
         dim = X.shape[1]

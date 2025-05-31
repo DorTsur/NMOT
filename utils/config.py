@@ -16,8 +16,8 @@ def GetArgs():
     argparser = argparse.ArgumentParser(description=__doc__)
     argparser.add_argument('--config', type=str, help='configuration file')
     argparser.add_argument('--wandb_project_name',  type=str, help='wandb project name')
-    argparser.add_argument('--run',  type=str, help='Run mode')
-    argparser.add_argument('--experiment',  type=str, help='Experiment type')
+    argparser.add_argument('--run',  type=str, help='Run mode - for directory organization')
+    argparser.add_argument('--experiment',  type=str, choices=['mnist'], help='Experiment type')
     argparser.add_argument('--batch_size',  type=int, help='Batch size')
     argparser.add_argument('--epochs',  type=int, help='Number of epochs')
     argparser.add_argument('--lr',  type=float, help='Learning rate')
@@ -30,10 +30,10 @@ def GetArgs():
     argparser.add_argument('--hidden_dim',  type=int, help='Dimension of hidden layers')
     argparser.add_argument('--mod',  type=str, choices=['mot', 'mgw'], help='Model type')
     argparser.add_argument('--seed',  type=int, help='Random seed')
-    argparser.add_argument('--data_dist',  type=str, help='Data distribution type')
+    argparser.add_argument('--data_dist',  type=str, choices=['uniform', 'gauss', 'gmm'], help='Data distribution type')
     argparser.add_argument('--dims',  nargs='+', type=int, help='Dimensions of the data')
     argparser.add_argument('--dim', type=int, help='Dimensions of the data')
-    argparser.add_argument('--device',  type=str, help='Device to use')
+    argparser.add_argument('--device',  type=str, choices=['gpu', 'cpu'], help='Device to use')
     argparser.add_argument('--cuda_visible',  type=int, help='CUDA visible device')
     argparser.add_argument('--using_wandb',  type=int, help='Use Weights & Biases logging')
     argparser.add_argument('--cost_graph',  type=str, choices=['full', 'circle', 'tree'],
@@ -48,9 +48,16 @@ def GetArgs():
     argparser.add_argument('--regularize_pariwise_coupling_reg',  type=float, help='pairwise coupling regularization coefficient')
     argparser.add_argument('--euler',  type=int, help='euler flows case flag')
     argparser.add_argument('--calc_ot_cost',  type=int, help='a flag to skip the ot cost claculation')
-    argparser.add_argument('--cost_implement',  type=str, help='a flag to skip the ot cost claculation')
-    argparser.add_argument('--gauss_std',  type=float, help='a flag to skip the ot cost claculation')
-    argparser.add_argument('--dataset',  type=str, help='dataset choice')
+    argparser.add_argument('--cost_implement',  type=str, choices=['simplified'], help='cost implementation type')
+    argparser.add_argument('--gauss_std',  type=float, help='gaussian standard deviation')
+    argparser.add_argument('--dataset',  type=str, choices=['mnist', 'synthetic', 'cifar'], help='dataset choice')
+    argparser.add_argument('--norm_by_k',  type=str, choices=['0', '1'], help='cost normalization by k')
+    argparser.add_argument(
+    "--mnist_marginals",
+    type=lambda s: [int(ch) for ch in s],   # "123" ➜ [1, 2, 3]
+    default=[],                              # sensible default
+    help="specific mnist marginals choice"
+    )
 
 
 
@@ -92,25 +99,26 @@ def GetConfig(args):
         'k': 3,
         'eps': 1,
         'cost': 'quad',  # options - quad, quad_gw, ip_gw
-        'alg': 'sinkhorn_mot',  # options - ne_mot, sinkhorn_mot,ne_mgw, sinkhorn_gw
+        'alg': 'ne_mot',  # options - ne_mot, sinkhorn_mot,ne_mgw, sinkhorn_gw
         'hidden_dim': 32,
         'mod': 'mot',  # options - mot, mgw
         'seed': 1,
-        'data_dist': 'uniform',   # options - uniform, gauss
-        'dataset': 'mnist',
+        'data_dist': 'gmm',   # options - uniform, gauss, gmm
+        'dataset': 'synthetic',  #options - mnist, synthetic
         'gauss_std': 1,
         # 'dims': [1,1,1,1,1,1,1,1],
         # 'dims': [100,100,100,100,100,100,100,100],
-        'dim': 500,
+        'dim': 100,
         'device': 'gpu',
         'cuda_visible': 3,
         'using_wandb': 0,
         'cost_graph': 'full',  # The cost function graphical structure for decomposition. Options-full,circle,tree
         'cost_implement': 'simplified',
         'enc_dim': 784,
+        'norm_by_k': 1,
 
 
-        "wandb_entity": <WANDB_IDNETITY>,
+        "wandb_entity": "dortsur",
 
         "schedule": 1,
         "schedule_step": 5,
@@ -163,7 +171,11 @@ def GetConfig(args):
 
     now = datetime.datetime.now()
     now_str = now.strftime("%Y-%m-%d_%H-%M-%S")
-    config.figDir = f"results/{config.run}/{config.alg}/k_{config.k}/n_{config.n}/eps_{config.eps}/_stamp_{now_str}"
+    config.figDir = f"results/{config.run}/{config.alg}/n_{config.n}/eps_{config.eps}/k_{config.k}/d_{config.dim}/_stamp_{now_str}"
+    if config.dataset == 'mnist':
+        config.figDir = f"results/{config.run}/{config.dataset}/{config.alg}/n_{config.n}/eps_{config.eps}/k_{config.k}/_stamp_{now_str}"
+    if config.mnist_marginals != []:
+        config.figDir = f"results/{config.run}/{config.dataset}/{config.alg}/n_{config.n}/eps_{config.eps}/k_{config.k}/maginals_{config.mnist_marginals}/_stamp_{now_str}"
     os.makedirs(config.figDir, exist_ok=True)
 
     config.print()
