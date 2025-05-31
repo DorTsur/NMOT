@@ -2,6 +2,8 @@
 
 Implementation of "Neural Estimation for Scaling Entropic Multimarginal Optimal Transport" by Dor Tsur, Ziv Goldfeld, Kristjan Greenewald, and Haim Permuter.
 
+![NEMOT Algorithm](images/nemot_alg.png)
+
 ## Overview
 
 Entropic Multimarginal Optimal Transport (EMOT) handles interactions among multiple probability distributions but scales poorly with the number of marginals \(k\) and dataset size \(n\). NEMOT replaces the classical Sinkhorn solver with a mini-batch, neural-network–based estimator:
@@ -13,12 +15,15 @@ Entropic Multimarginal Optimal Transport (EMOT) handles interactions among multi
 
 This repository provides a reference Python implementation of NEMOT (for full and sparse cost graphs) and an extension to Multimarginal Gromov–Wasserstein (NEMGW).
 
+![NEMOT Runtime Comparison](images/nemot_runtime.png)
+
 ## Installation
 
 1. **Clone the repository**  
    ```bash
    git clone https://github.com/DorTsur/NMOT.git
    cd NMOT
+   ```
 
 2. **Install dependencies**
    ```bash
