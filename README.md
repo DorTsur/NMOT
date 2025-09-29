@@ -1,6 +1,6 @@
 # Neural Entropic Multimarginal Optimal Transport (NEMOT)
 
-Implementation of "Neural Estimation for Scaling Entropic Multimarginal Optimal Transport" by Dor Tsur, Ziv Goldfeld, Kristjan Greenewald, and Haim Permuter.
+Implementation of "Neural Estimation for Scaling Entropic Multimarginal Optimal Transport" 
 
 ![NEMOT Algorithm](images/nemot_alg.png)
 
